@@ -3,138 +3,151 @@ import time
 import hmac
 import hashlib
 import requests
+import pandas as pd
+import pandas_ta as ta
 from urllib.parse import urlencode
+from dotenv import load_dotenv
 
-TELEGRAM_TOKEN = "8773224473:AAHGRlakz16tN4vFAbo-nEMylr3BhrCYmBU"
-BINANCE_API_KEY = "XMiQx4boaVAYPQ6w7KRIQz1pwyTAiaw0TVIf2a11KojLFNMnfjzCpRvKD0onXOnc"
-BINANCE_SECRET = "UioxraklkGh8lwFUmqkYMh8j5s10ldEtEamThXaqwm6q9lMiGh1aGUeKKqhk1yu7"
+# Yapılandırmayı yükle
+load_dotenv()
 
-STOP_LOSS_PCT = 1.5
-TAKE_PROFIT_PCT = 2.5
-TRAILING_STEP = 0.5
-CHECK_INTERVAL = 10
-BINANCE_URL = "https://api.binance.com"
+# Sabitler
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
+TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-bot_state = {"aktif": False, "symbol": None, "giris_fiyat": None, "stop_loss": None, "take_profit": None, "chat_id": None, "mod": "bildirim", "islem_sayisi": 0}
+# Strateji Ayarları
+DUSUS_ESIGI = -10.0  # %10 ve üzeri düşenler
+MIN_HACIM = 2000000   # 2M USDT Hacim barajı
+ALIM_BUT_USDT = 20    # Her işlemde 20 USDT'lik alım yap
+STOP_LOSS_PCT = 1.5   # %1.5 Zarar durdur
+TRAILING_STEP = 0.5   # Takip adımı
+ZAMAN_LIMITI = 86400  # 24 Saat kuralı
 
-def telegram_gonder(chat_id, mesaj):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+# --- TEMEL FONKSİYONLAR ---
+
+def telegram_gonder(mesaj):
+    if not TG_TOKEN: return
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={"chat_id": chat_id, "text": mesaj, "parse_mode": "HTML"}, timeout=10)
-    except:
-        pass
+        requests.post(url, data={"chat_id": TG_CHAT_ID, "text": mesaj, "parse_mode": "HTML"})
+    except: pass
 
-def telegram_guncelle_al():
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-    try:
-        r = requests.get(url, params={"timeout": 5, "offset": telegram_guncelle_al.offset}, timeout=10)
-        updates = r.json().get("result", [])
-        if updates:
-            telegram_guncelle_al.offset = updates[-1]["update_id"] + 1
-        return updates
-    except:
-        return []
-
-telegram_guncelle_al.offset = 0
-
-def binance_imza(params):
+def binance_istek(method, endpoint, params={}):
+    params['timestamp'] = int(time.time() * 1000)
     query = urlencode(params)
-    return hmac.new(BINANCE_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
+    signature = hmac.new(API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
+    params['signature'] = signature
+    headers = {'X-MBX-APIKEY': API_KEY}
+    url = f"https://api.binance.com{endpoint}"
+    
+    if method == "POST":
+        return requests.post(url, params=params, headers=headers).json()
+    return requests.get(url, params=params, headers=headers).json()
 
-def fiyat_al(symbol):
+def teknik_analiz_yap(symbol):
+    """RSI ve Oynaklık (Yatay Seyir) hesaplar"""
     try:
-        r = requests.get(f"{BINANCE_URL}/api/v3/ticker/price", params={"symbol": symbol}, timeout=5)
-        return float(r.json()["price"])
-    except:
-        return None
+        r = requests.get(f"https://api.binance.com/api/v3/klines", 
+                         params={"symbol": symbol, "interval": "1h", "limit": 50}).json()
+        df = pd.DataFrame(r, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'ct', 'qv', 'nt', 'tb', 'tg', 'i'])
+        df['c'] = df['c'].astype(float)
+        
+        rsi = ta.rsi(df['c'], length=14).iloc[-1]
+        
+        # Son 3 mumdaki fiyat farkı yüzdesi (Yatay seyir kontrolü)
+        son_fiyatlar = df['c'].tail(3)
+        oynaklik = (son_fiyatlar.max() - son_fiyatlar.min()) / son_fiyatlar.min() * 100
+        
+        return rsi, oynaklik
+    except: return None, None
 
-def komut_isle(chat_id, mesaj):
-    global STOP_LOSS_PCT, TAKE_PROFIT_PCT
-    parcalar = mesaj.strip().split()
-    komut = parcalar[0].lower()
-    if komut == "/baslat":
-        bot_state["chat_id"] = chat_id
-        telegram_gonder(chat_id, f"🤖 <b>Kripto Bot Aktif!</b>\n\n/takip BTCUSDT - Takip başlat\n/dur - Durdur\n/mod bildirim veya otomatik\n/ayar stop 1.5\n/ayar hedef 2.5\n/durum - Durum göster\n/fiyat BTCUSDT\n\n🔴 Stop: %{STOP_LOSS_PCT} 🟢 Hedef: %{TAKE_PROFIT_PCT}")
-    elif komut == "/takip":
-        if len(parcalar) < 2:
-            telegram_gonder(chat_id, "Kullanım: /takip BTCUSDT"); return
-        symbol = parcalar[1].upper()
-        fiyat = fiyat_al(symbol)
-        if not fiyat:
-            telegram_gonder(chat_id, f"❌ {symbol} bulunamadı."); return
-        bot_state.update({"aktif": True, "symbol": symbol, "giris_fiyat": fiyat, "stop_loss": fiyat*(1-STOP_LOSS_PCT/100), "take_profit": fiyat*(1+TAKE_PROFIT_PCT/100), "chat_id": chat_id})
-        telegram_gonder(chat_id, f"✅ <b>{symbol} takibi başladı!</b>\n💰 Fiyat: {fiyat:.4f}\n🔴 Stop: {bot_state['stop_loss']:.4f}\n🟢 Hedef: {bot_state['take_profit']:.4f}\n⚙️ Mod: {bot_state['mod']}")
-    elif komut == "/dur":
-        bot_state["aktif"] = False; telegram_gonder(chat_id, "⏹️ Durduruldu.")
-    elif komut == "/mod":
-        if len(parcalar) > 1 and parcalar[1] in ["bildirim","otomatik"]:
-            bot_state["mod"] = parcalar[1]; telegram_gonder(chat_id, f"✅ Mod: {parcalar[1]}")
-    elif komut == "/ayar":
-        if len(parcalar) > 2:
-            try:
-                d = float(parcalar[2])
-                if parcalar[1]=="stop": STOP_LOSS_PCT=d; telegram_gonder(chat_id, f"🔴 Stop: %{d}")
-                elif parcalar[1]=="hedef": TAKE_PROFIT_PCT=d; telegram_gonder(chat_id, f"🟢 Hedef: %{d}")
-            except: pass
-    elif komut == "/durum":
-        if not bot_state["aktif"]:
-            telegram_gonder(chat_id, "⏹️ Aktif takip yok."); return
-        fiyat = fiyat_al(bot_state["symbol"])
-        degisim = (fiyat - bot_state["giris_fiyat"]) / bot_state["giris_fiyat"] * 100 if fiyat else 0
-        telegram_gonder(chat_id, f"📊 {bot_state['symbol']}\n💰 Giriş: {bot_state['giris_fiyat']:.4f}\n📈 Şu an: {fiyat:.4f}\n{'🟢' if degisim>=0 else '🔴'} %{degisim:.2f}\n🔴 Stop: {bot_state['stop_loss']:.4f}\n🟢 Hedef: {bot_state['take_profit']:.4f}")
-    elif komut == "/fiyat":
-        if len(parcalar) > 1:
-            f = fiyat_al(parcalar[1].upper())
-            telegram_gonder(chat_id, f"💰 {parcalar[1].upper()}: {f:.6f}" if f else "❌ Bulunamadı.")
+# --- İŞLEM MANTIKLARI ---
 
-def fiyat_kontrol():
-    if not bot_state["aktif"]: return
-    fiyat = fiyat_al(bot_state["symbol"])
-    if not fiyat: return
-    chat_id = bot_state["chat_id"]
-    degisim = (fiyat - bot_state["giris_fiyat"]) / bot_state["giris_fiyat"] * 100
-    tetiklendi = False
-    if fiyat <= bot_state["stop_loss"]:
-        telegram_gonder(chat_id, f"🔴 <b>STOP LOSS!</b>\n{bot_state['symbol']} = {fiyat:.4f}\n📉 %{degisim:.2f}\n{'⚡ Şimdi SAT!' if bot_state['mod']=='bildirim' else '🤖 Otomatik satış yapılıyor...'}")
-        tetiklendi = True
-    elif fiyat >= bot_state["take_profit"]:
-        telegram_gonder(chat_id, f"🟢 <b>TAKE PROFIT!</b>\n{bot_state['symbol']} = {fiyat:.4f}\n📈 %{degisim:.2f}\n{'⚡ Şimdi SAT!' if bot_state['mod']=='bildirim' else '🤖 Otomatik satış yapılıyor...'}")
-        tetiklendi = True
-    if tetiklendi:
-        bot_state["islem_sayisi"] += 1
-        bot_state["giris_fiyat"] = fiyat
-        bot_state["stop_loss"] = fiyat * (1-(STOP_LOSS_PCT+TRAILING_STEP)/100)
-        bot_state["take_profit"] = fiyat * (1+(TAKE_PROFIT_PCT+TRAILING_STEP)/100)
-        telegram_gonder(chat_id, f"⬆️ Seviyeler güncellendi!\n🔴 Yeni Stop: {bot_state['stop_loss']:.4f}\n🟢 Yeni Hedef: {bot_state['take_profit']:.4f}")
+def firsat_bul():
+    print("🔎 Piyasada dip avına çıkıldı...")
+    tickers = requests.get("https://api.binance.com/api/v3/ticker/24hr").json()
+    adaylar = []
+    
+    for t in tickers:
+        symbol = t['symbol']
+        degisim = float(t['priceChangePercent'])
+        hacim = float(t['quoteVolume'])
+        
+        if symbol.endswith('USDT') and degisim <= DUSUS_ESIGI and hacim >= MIN_HACIM:
+            rsi, oynaklik = teknik_analiz_yap(symbol)
+            # RSI 35 altı (Dip) ve Oynaklık 1.2 altı (Yatay/Duran düşüş)
+            if rsi and rsi < 35 and oynaklik < 1.2:
+                adaylar.append({"symbol": symbol, "price": float(t['lastPrice']), "rsi": rsi})
+    
+    return sorted(adaylar, key=lambda x: x['rsi'])[0] if adaylar else None
 
 def main():
-    print("🤖 Bot başlatıldı! Telegram'da /baslat yaz.")
-    son_kontrol = 0
+    aktif_pozisyon = None
+    giris_fiyati = 0
+    en_yuksek_fiyat = 0
+    giris_zamani = 0
+
+    telegram_gonder("🤖 <b>Bot Başlatıldı!</b>\nStrateji: Dip Avcısı + 24s Kuralı")
+
     while True:
-        for update in telegram_guncelle_al():
-            m = update.get("message", {})
-            cid = m.get("chat", {}).get("id")
-            txt = m.get("text", "")
-            if cid and txt: komut_isle(cid, txt)
-        if time.time() - son_kontrol >= CHECK_INTERVAL:
-            fiyat_kontrol(); son_kontrol = time.time()
-        time.sleep(1)
+        try:
+            if not aktif_pozisyon:
+                firsat = firsat_bul()
+                if firsat:
+                    # ALIM İŞLEMİ
+                    res = binance_istek("POST", "/api/v3/order", {
+                        "symbol": firsat['symbol'], "side": "BUY", "type": "MARKET", "quoteOrderQty": ALIM_BUT_USDT
+                    })
+                    
+                    if 'orderId' in res:
+                        aktif_pozisyon = firsat['symbol']
+                        giris_fiyati = float(res['fills'][0]['price'])
+                        en_yuksek_fiyat = giris_fiyati
+                        giris_zamani = time.time()
+                        telegram_gonder(f"✅ <b>ALIM YAPILDI!</b>\nCoin: {aktif_pozisyon}\nFiyat: {giris_fiyati}\nRSI: {firsat['rsi']:.2f}")
+                    else:
+                        print(f"Alım hatası: {res}")
+            
+            else:
+                # POZİSYON TAKİBİ
+                ticker = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={aktif_pozisyon}").json()
+                su_an_fiyat = float(ticker['price'])
+                gecen_sure = time.time() - giris_zamani
+                
+                # En yüksek fiyatı güncelle
+                if su_an_fiyat > en_yuksek_fiyat:
+                    en_yuksek_fiyat = su_an_fiyat
+                
+                # Dinamik Stop Seviyesi (Trailing)
+                guncel_stop = en_yuksek_fiyat * (1 - STOP_LOSS_PCT / 100)
+                
+                # SATIŞ KOŞULLARI
+                satis_nedeni = None
+                if su_an_fiyat <= guncel_stop:
+                    satis_nedeni = "STOP LOSS / TRAILING"
+                elif gecen_sure >= ZAMAN_LIMITI:
+                    satis_nedeni = "24 SAAT DOLDU"
+
+                if satis_nedeni:
+                    # Cüzdan bakiyesini al ve sat (Küçük miktar kalmaması için)
+                    hesap = binance_istek("GET", "/api/v3/account")
+                    vize = [a for a in hesap['balances'] if a['asset'] == aktif_pozisyon.replace('USDT', '')][0]
+                    miktar = float(vize['free'])
+                    
+                    res = binance_istek("POST", "/api/v3/order", {
+                        "symbol": aktif_pozisyon, "side": "SELL", "type": "MARKET", "quantity": miktar
+                    })
+                    
+                    kar_zarar = ((su_an_fiyat - giris_fiyati) / giris_fiyati) * 100
+                    telegram_gonder(f"🚀 <b>SATIŞ YAPILDI!</b>\nNeden: {satis_nedeni}\nKâr/Zarar: %{kar_zarar:.2f}")
+                    aktif_pozisyon = None
+
+            time.sleep(60) # Her dakika kontrol et
+        except Exception as e:
+            print(f"Hata: {e}")
+            time.sleep(30)
 
 if __name__ == "__main__":
-    main()import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot aktif")
-    def log_message(self, format, *args):
-        pass
-
-def start_server():
-    port = int(os.environ.get("PORT", 10000))
-    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
-
-threading.Thread(target=start_server, daemon
+    main()
