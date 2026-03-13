@@ -1,4 +1,4 @@
 requests
-pandas
-pandas-ta
 python-dotenv
+pandas==2.0.3
+pandas-ta
