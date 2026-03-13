@@ -3,8 +3,8 @@ import time
 import hmac
 import hashlib
 import requests
-import pandas as pd
-import pandas_ta as ta
+# import pandas as pd
+# import pandas_ta as ta
 from urllib.parse import urlencode
 from dotenv import load_dotenv
 from flask import Flask
