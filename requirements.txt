@@ -1,5 +1,4 @@
 requests
 python-dotenv
---find-links https://download.pytorch.org/whl/cpu/torch_stable.html
-pandas==1.5.3
-pandas-ta==0.3.14b0
+pandas
+pandas-ta
