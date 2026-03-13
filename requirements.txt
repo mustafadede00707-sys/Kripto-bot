@@ -1,2 +1,4 @@
 requests
 python-dotenv
+--only-binary=:all: pandas
+--only-binary=:all: pandas-ta
