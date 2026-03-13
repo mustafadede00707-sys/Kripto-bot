@@ -24,17 +24,17 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# --- SETTINGS ---
+# --- SETTINGS (GÜNCELLENDİ) ---
 load_dotenv()
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-DUSUS_ESIGI = -10.0
-MIN_HACIM = 2000000
-ALIM_BUT_USDT = 100  # Her alım 100 dolar
-MAX_POZISYON = 3     # Aynı anda en fazla 3 coin
+DUSUS_ESIGI = -7.0  # %10'dan %7'ye düşürüldü
+MIN_HACIM = 1500000 # 2M'den 1.5M USDT'ye düşürüldü
+ALIM_BUT_USDT = 100
+MAX_POZISYON = 3
 STOP_LOSS_PCT = 1.5
 ZAMAN_LIMITI = 86400
 
@@ -54,9 +54,8 @@ def binance_istek(method, endpoint, params={}):
     headers = {'X-MBX-APIKEY': API_KEY}
     url = f"https://api.binance.com{endpoint}"
     try:
-        if method == "POST":
-            return requests.post(url, params=params, headers=headers, timeout=15).json()
-        return requests.get(url, params=params, headers=headers, timeout=15).json()
+        response = requests.request(method, url, params=params, headers=headers, timeout=15)
+        return response.json()
     except: return {}
 
 def hesapla_rsi(fiyatlar, period=14):
@@ -90,21 +89,26 @@ def firsat_bul(mevcut_pozisyonlar):
         adaylar = []
         for t in tickers:
             symbol = t['symbol']
-            if symbol in mevcut_pozisyonlar: continue
+            if not symbol.endswith('USDT') or symbol in mevcut_pozisyonlar: continue
+            
             degisim = float(t['priceChangePercent'])
             hacim = float(t['quoteVolume'])
-            if symbol.endswith('USDT') and degisim <= DUSUS_ESIGI and hacim >= MIN_HACIM:
+            
+            # Kriter Kontrolü
+            if degisim <= DUSUS_ESIGI and hacim >= MIN_HACIM:
                 rsi, oynaklik = teknik_analiz_yap(symbol)
-                if rsi and rsi < 35 and oynaklik < 1.2:
+                # RSI filtresini de biraz esnettim (35 -> 40) ki daha kolay fırsat bulsun
+                if rsi and rsi < 40 and oynaklik < 2.0: 
                     adaylar.append({"symbol": symbol, "price": float(t['lastPrice']), "rsi": rsi})
+        
         return sorted(adaylar, key=lambda x: x['rsi'])[0] if adaylar else None
     except: return None
 
 # --- MAIN LOOP ---
 def main():
     keep_alive()
-    pozisyonlar = {} # {symbol: {giris: 0, en_yuksek: 0, zaman: 0}}
-    telegram_gonder("🚀 <b>Çoklu Alım Modu Aktif!</b>\nHer işlem: 100 USDT\nMax Pozisyon: 3")
+    pozisyonlar = {}
+    telegram_gonder(f"🚀 <b>Bot Başlatıldı!</b>\nEşik: %{DUSUS_ESIGI}\nMin Hacim: {MIN_HACIM} USDT")
 
     while True:
         try:
@@ -119,7 +123,9 @@ def main():
                         symbol = firsat['symbol']
                         fiyat = float(res['fills'][0]['price'])
                         pozisyonlar[symbol] = {"giris": fiyat, "en_yuksek": fiyat, "zaman": time.time()}
-                        telegram_gonder(f"✅ <b>ALIM: {symbol}</b>\nFiyat: {fiyat}\nKasa: {len(pozisyonlar)}/{MAX_POZISYON}")
+                        telegram_gonder(f"✅ <b>ALIM YAPILDI: {symbol}</b>\nFiyat: {fiyat}\nRSI: {firsat['rsi']:.2f}")
+                else:
+                    print("Uygun fırsat aranıyor...") # Konsol logu
 
             # SATIŞ KONTROLÜ
             for symbol in list(pozisyonlar.keys()):
@@ -133,21 +139,24 @@ def main():
                 gecen_sure = time.time() - data['zaman']
                 
                 satis_nedeni = None
-                if su_an <= guncel_stop: satis_nedeni = "STOP LOSS"
-                elif gecen_sure >= ZAMAN_LIMITI: satis_nedeni = "24 SAAT"
+                if su_an <= guncel_stop: satis_nedeni = "STOP LOSS (Trailing)"
+                elif gecen_sure >= ZAMAN_LIMITI: satis_nedeni = "24 SAAT DOLDU"
 
                 if satis_nedeni:
+                    # Miktar bilgisini çek ve sat
                     hesap = binance_istek("GET", "/api/v3/account")
-                    miktar = [a for a in hesap['balances'] if a['asset'] == symbol.replace('USDT', '')][0]['free']
+                    miktar = next(a['free'] for a in hesap['balances'] if a['asset'] == symbol.replace('USDT', ''))
                     res = binance_istek("POST", "/api/v3/order", {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": float(miktar)})
-                    kar = ((su_an - data['giris']) / data['giris']) * 100
-                    telegram_gonder(f"🚀 <b>SATIŞ: {symbol}</b>\nNeden: {satis_nedeni}\nKâr/Zarar: %{kar:.2f}")
-                    del pozisyonlar[symbol]
+                    
+                    if 'orderId' in res:
+                        kar = ((su_an - data['giris']) / data['giris']) * 100
+                        telegram_gonder(f"🚀 <b>SATIŞ: {symbol}</b>\nNeden: {satis_nedeni}\nKâr/Zarar: %{kar:.2f}")
+                        del pozisyonlar[symbol]
 
-            time.sleep(30)
+            time.sleep(60) # Binance'ı çok yormamak için 60 saniye idealdir
         except Exception as e:
-            print(f"Hata: {e}")
-            time.sleep(10)
+            print(f"Hata oluştu: {e}")
+            time.sleep(20)
 
 if __name__ == "__main__":
     main()
