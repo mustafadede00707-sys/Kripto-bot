@@ -10,44 +10,41 @@ from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
 
-# --- FLASK SUNUCUSU (RENDER İÇİN) ---
+# --- RENDER ALIVE MECHANISM ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot aktif ve calisiyor!"
+    return "Bot is running!"
 
 def run():
-    # Render'ın atadığı portu al, yoksa 10000 kullan
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     t = Thread(target=run)
+    t.daemon = True
     t.start()
 
-# --- MEVCUT AYARLARIN VE FONKSİYONLARIN ---
+# --- SETTINGS ---
 load_dotenv()
-
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Strateji Ayarları (Aynı kalabilir)
 DUSUS_ESIGI = -10.0
 MIN_HACIM = 2000000
 ALIM_BUT_USDT = 20
 STOP_LOSS_PCT = 1.5
-TRAILING_STEP = 0.5
 ZAMAN_LIMITI = 86400
 
-# [Buradaki telegram_gonder, binance_istek ve teknik_analiz_yap fonksiyonlarını aynen koru]
+# --- FUNCTIONS ---
 def telegram_gonder(mesaj):
     if not TG_TOKEN: return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={"chat_id": TG_CHAT_ID, "text": mesaj, "parse_mode": "HTML"})
+        requests.post(url, data={"chat_id": TG_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, timeout=10)
     except: pass
 
 def binance_istek(method, endpoint, params={}):
@@ -57,14 +54,18 @@ def binance_istek(method, endpoint, params={}):
     params['signature'] = signature
     headers = {'X-MBX-APIKEY': API_KEY}
     url = f"https://api.binance.com{endpoint}"
-    if method == "POST":
-        return requests.post(url, params=params, headers=headers).json()
-    return requests.get(url, params=params, headers=headers).json()
+    try:
+        if method == "POST":
+            return requests.post(url, params=params, headers=headers, timeout=15).json()
+        return requests.get(url, params=params, headers=headers, timeout=15).json()
+    except Exception as e:
+        print(f"API Error: {e}")
+        return {}
 
 def teknik_analiz_yap(symbol):
     try:
         r = requests.get(f"https://api.binance.com/api/v3/klines", 
-                         params={"symbol": symbol, "interval": "1h", "limit": 50}).json()
+                         params={"symbol": symbol, "interval": "1h", "limit": 50}, timeout=10).json()
         df = pd.DataFrame(r, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'ct', 'qv', 'nt', 'tb', 'tg', 'i'])
         df['c'] = df['c'].astype(float)
         rsi = ta.rsi(df['c'], length=14).iloc[-1]
@@ -74,25 +75,23 @@ def teknik_analiz_yap(symbol):
     except: return None, None
 
 def firsat_bul():
-    tickers = requests.get("https://api.binance.com/api/v3/ticker/24hr").json()
-    adaylar = []
-    for t in tickers:
-        symbol = t['symbol']
-        try:
+    try:
+        tickers = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15).json()
+        adaylar = []
+        for t in tickers:
+            symbol = t['symbol']
             degisim = float(t['priceChangePercent'])
             hacim = float(t['quoteVolume'])
             if symbol.endswith('USDT') and degisim <= DUSUS_ESIGI and hacim >= MIN_HACIM:
                 rsi, oynaklik = teknik_analiz_yap(symbol)
                 if rsi and rsi < 35 and oynaklik < 1.2:
                     adaylar.append({"symbol": symbol, "price": float(t['lastPrice']), "rsi": rsi})
-        except: continue
-    return sorted(adaylar, key=lambda x: x['rsi'])[0] if adaylar else None
+        return sorted(adaylar, key=lambda x: x['rsi'])[0] if adaylar else None
+    except: return None
 
-# --- MAIN DÖNGÜSÜ ---
+# --- MAIN LOOP ---
 def main():
-    # Flask sunucusunu başlat
     keep_alive()
-    
     aktif_pozisyon = None
     giris_fiyati = 0
     en_yuksek_fiyat = 0
@@ -102,11 +101,51 @@ def main():
 
     while True:
         try:
-            # [Buradaki alım-satım mantığını aynen koru]
-            # ... (Senin paylaştığın while True döngüsü içeriği)
+            if not aktif_pozisyon:
+                firsat = firsat_bul()
+                if firsat:
+                    res = binance_istek("POST", "/api/v3/order", {
+                        "symbol": firsat['symbol'], "side": "BUY", "type": "MARKET", "quoteOrderQty": ALIM_BUT_USDT
+                    })
+                    if 'orderId' in res:
+                        aktif_pozisyon = firsat['symbol']
+                        giris_fiyati = float(res['fills'][0]['price'])
+                        en_yuksek_fiyat = giris_fiyati
+                        giris_zamani = time.time()
+                        telegram_gonder(f"✅ <b>ALIM YAPILDI!</b>\nCoin: {aktif_pozisyon}\nFiyat: {giris_fiyati}")
+            
+            else:
+                ticker = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={aktif_pozisyon}").json()
+                su_an_fiyat = float(ticker['price'])
+                gecen_sure = time.time() - giris_zamani
+                
+                if su_an_fiyat > en_yuksek_fiyat:
+                    en_yuksek_fiyat = su_an_fiyat
+                
+                guncel_stop = en_yuksek_fiyat * (1 - STOP_LOSS_PCT / 100)
+                
+                satis_nedeni = None
+                if su_an_fiyat <= guncel_stop:
+                    satis_nedeni = "STOP LOSS / TRAILING"
+                elif gecen_sure >= ZAMAN_LIMITI:
+                    satis_nedeni = "24 SAAT DOLDU"
+
+                if satis_nedeni:
+                    hesap = binance_istek("GET", "/api/v3/account")
+                    vize = [a for a in hesap['balances'] if a['asset'] == aktif_pozisyon.replace('USDT', '')][0]
+                    miktar = float(vize['free'])
+                    
+                    res = binance_istek("POST", "/api/v3/order", {
+                        "symbol": aktif_pozisyon, "side": "SELL", "type": "MARKET", "quantity": miktar
+                    })
+                    
+                    kar_zarar = ((su_an_fiyat - giris_fiyati) / giris_fiyati) * 100
+                    telegram_gonder(f"🚀 <b>SATIŞ YAPILDI!</b>\nNeden: {satis_nedeni}\nKâr/Zarar: %{kar_zarar:.2f}")
+                    aktif_pozisyon = None
+
             time.sleep(60)
         except Exception as e:
-            print(f"Hata: {e}")
+            print(f"Error: {e}")
             time.sleep(30)
 
 if __name__ == "__main__":
