@@ -3,8 +3,6 @@ import time
 import hmac
 import hashlib
 import requests
-# import pandas as pd
-# import pandas_ta as ta
 from urllib.parse import urlencode
 from dotenv import load_dotenv
 from flask import Flask
@@ -48,6 +46,9 @@ def telegram_gonder(mesaj):
     except: pass
 
 def binance_istek(method, endpoint, params={}):
+    if not API_SECRET or not API_KEY:
+        print("API Anahtarları Eksik!")
+        return {}
     params['timestamp'] = int(time.time() * 1000)
     query = urlencode(params)
     signature = hmac.new(API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
@@ -62,15 +63,33 @@ def binance_istek(method, endpoint, params={}):
         print(f"API Error: {e}")
         return {}
 
+def hesapla_rsi(fiyatlar, period=14):
+    if len(fiyatlar) <= period: return 50
+    deltas = [fiyatlar[i+1] - fiyatlar[i] for i in range(len(fiyatlar)-1)]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+    
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    
+    if avg_loss == 0: return 100
+    
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (100 + rs))
+
 def teknik_analiz_yap(symbol):
     try:
         r = requests.get(f"https://api.binance.com/api/v3/klines", 
                          params={"symbol": symbol, "interval": "1h", "limit": 50}, timeout=10).json()
-        df = pd.DataFrame(r, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'ct', 'qv', 'nt', 'tb', 'tg', 'i'])
-        df['c'] = df['c'].astype(float)
-        rsi = ta.rsi(df['c'], length=14).iloc[-1]
-        son_fiyatlar = df['c'].tail(3)
-        oynaklik = (son_fiyatlar.max() - son_fiyatlar.min()) / son_fiyatlar.min() * 100
+        kapanislar = [float(k[4]) for k in r]
+        
+        rsi = hesapla_rsi(kapanislar)
+        son_3 = kapanislar[-3:]
+        oynaklik = (max(son_3) - min(son_3)) / min(son_3) * 100
         return rsi, oynaklik
     except: return None, None
 
@@ -97,7 +116,7 @@ def main():
     en_yuksek_fiyat = 0
     giris_zamani = 0
 
-    telegram_gonder("🤖 <b>Bot Başlatıldı!</b>\nRender üzerinde aktif.")
+    telegram_gonder("🤖 <b>Bot Başlatıldı!</b>\nPandas olmadan aktif.")
 
     while True:
         try:
