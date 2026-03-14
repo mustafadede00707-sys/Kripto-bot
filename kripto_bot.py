@@ -258,8 +258,8 @@ def firsat_bul(mevcut_semboller: list):
         return sorted(adaylar, key=lambda x: x["rsi"])[0]
 
     except Exception as e:
-        print(f"[FIRSAT_BUL HATA] {e}")
-        return None
+    print(f"[FIRSAT_BUL HATA] {type(e).__name__}: {e}")
+    return None
 
 # ============================================================
 # ANA DÖNGÜ
