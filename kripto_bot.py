@@ -167,4 +167,12 @@ def main():
             time.sleep(10)
 
 if __name__ == "__main__":
-    main()
+    # Botu ayrı bir kolda başlat
+    bot_thread = Thread(target=main)
+    bot_thread.daemon = True
+    bot_thread.start()
+    
+    # Web sunucusunu ana kolda başlat (Render bunu bekler)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
