@@ -1,3 +1,17 @@
+import requests
+import os
+
+# --- DEBUG TESTİ BAŞLAT ---
+try:
+    current_ip = requests.get('https://api.ipify.org').text
+    print(f"--- SISTEM KONTROL ---")
+    print(f"BOTUN DIS IP ADRESI: {current_ip}")
+    print(f"BINANCE IP LISTESINDEKIYLE AYNI MI?: {'Evet' if current_ip == '216.24.57.1' else 'HAYIR!'}")
+    print(f"-----------------------")
+except Exception as e:
+    print(f"IP KONTROL HATASI: {e}")
+# --- DEBUG TESTİ BİTTİ ---
+
 import os
 import time
 import hmac
