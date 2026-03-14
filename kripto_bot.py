@@ -1,17 +1,3 @@
-import requests
-import os
-
-# --- DEBUG TESTİ BAŞLAT ---
-try:
-    current_ip = requests.get('https://api.ipify.org').text
-    print(f"--- SISTEM KONTROL ---")
-    print(f"BOTUN DIS IP ADRESI: {current_ip}")
-    print(f"BINANCE IP LISTESINDEKIYLE AYNI MI?: {'Evet' if current_ip == '216.24.57.1' else 'HAYIR!'}")
-    print(f"-----------------------")
-except Exception as e:
-    print(f"IP KONTROL HATASI: {e}")
-# --- DEBUG TESTİ BİTTİ ---
-
 import os
 import time
 import hmac
@@ -22,34 +8,29 @@ from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
 
-# --- RENDER ALIVE MECHANISM ---
+# --- RENDER WEB SERVER ---
 app = Flask('')
 
 @app.route('/')
 def home():
     return "Bot is running in FAST MODE!"
 
-def run():
+def run_flask():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-def keep_alive():
-    t = Thread(target=run)
-    t.daemon = True
-    t.start()
-
-# --- SETTINGS (HIZLI MOD) ---
+# --- SETTINGS (ISTEDIGIN PARAMETRELER) ---
 load_dotenv()
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-DUSUS_ESIGI = -7.0   # %7 ve üzeri düşüşleri yakala
-MIN_HACIM = 1500000  # 1.5 Milyon USDT hacim
+DUSUS_ESIGI = -7.0      # %7 Düşüş
+MIN_HACIM = 1000000     # 1 Milyon USDT Hacim
 ALIM_BUT_USDT = 100
 MAX_POZISYON = 3
-STOP_LOSS_PCT = 1.5
+STOP_LOSS_PCT = 1.5     # %1.5 Iz süren stop
 ZAMAN_LIMITI = 86400
 
 # --- FUNCTIONS ---
@@ -88,13 +69,12 @@ def hesapla_rsi(fiyatlar, period=14):
 
 def teknik_analiz_yap(symbol):
     try:
-        # HIZLI MOD: 1 saat yerine 15 dakikalık mumlar çekiliyor
         r = requests.get(f"https://api.binance.com/api/v3/klines", 
                          params={"symbol": symbol, "interval": "15m", "limit": 50}, timeout=10).json()
         kapanislar = [float(k[4]) for k in r]
         rsi = hesapla_rsi(kapanislar)
         son_3 = kapanislar[-3:]
-        # Oynaklık eşiği biraz daha esnetildi
+        # Oynaklık filtresi istediğin gibi artırıldı (Gözü kara mod)
         oynaklik = (max(son_3) - min(son_3)) / min(son_3) * 100
         return rsi, oynaklik
     except: return None, None
@@ -112,19 +92,18 @@ def firsat_bul(mevcut_pozisyonlar):
             
             if degisim <= DUSUS_ESIGI and hacim >= MIN_HACIM:
                 rsi, oynaklik = teknik_analiz_yap(symbol)
-                # Kriterler HIZLI MOD için esnetildi: RSI < 45, Oynaklık < 3.0
-                if rsi and rsi < 45 and oynaklik < 3.0: 
+                # Kriterler: RSI 40 ve Oynaklık limiti esnetildi (15.0)
+                if rsi and rsi < 40 and oynaklik < 15.0: 
                     adaylar.append({"symbol": symbol, "price": float(t['lastPrice']), "rsi": rsi})
         
-        print(f"🔍 Tarama bitti. Uygun aday sayısı: {len(adaylar)}")
+        print(f"🔍 Tarama: {len(adaylar)} aday bulundu.")
         return sorted(adaylar, key=lambda x: x['rsi'])[0] if adaylar else None
     except: return None
 
 # --- MAIN LOOP ---
-def main():
-    keep_alive()
+def trading_loop():
     pozisyonlar = {}
-    telegram_gonder("⚡ <b>HIZLI MOD Aktif!</b>\n15dk RSI ve %7 Düşüş Takibi Başladı.")
+    telegram_gonder("⚡ <b>HIZLI MOD: Sistem Başlatıldı</b>\nKriter: %7 Düşüş / RSI 40 / 1.5 Stop")
 
     while True:
         try:
@@ -138,9 +117,8 @@ def main():
                         symbol = firsat['symbol']
                         fiyat = float(res['fills'][0]['price'])
                         pozisyonlar[symbol] = {"giris": fiyat, "en_yuksek": fiyat, "zaman": time.time()}
-                        telegram_gonder(f"🚀 <b>HIZLI ALIM: {symbol}</b>\nFiyat: {fiyat}\nRSI: {firsat['rsi']:.2f}")
+                        telegram_gonder(f"🚀 <b>ALIM: {symbol}</b>\nFiyat: {fiyat}\nRSI: {firsat['rsi']:.2f}")
 
-            # SATIŞ KONTROLÜ
             for symbol in list(pozisyonlar.keys()):
                 ticker = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}").json()
                 su_an = float(ticker['price'])
@@ -158,21 +136,19 @@ def main():
                     
                     if 'orderId' in res:
                         kar = ((su_an - data['giris']) / data['giris']) * 100
-                        telegram_gonder(f"💰 <b>SATIŞ YAPILDI: {symbol}</b>\nKâr/Zarar: %{kar:.2f}")
+                        telegram_gonder(f"💰 <b>SATIS: {symbol}</b>\nKâr/Zarar: %{kar:.2f}")
                         del pozisyonlar[symbol]
 
-            time.sleep(30) # Her 30 saniyede bir kontrol et
+            time.sleep(30)
         except Exception as e:
             print(f"Hata: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
-    # Botu ayrı bir kolda başlat
-    bot_thread = Thread(target=main)
-    bot_thread.daemon = True
-    bot_thread.start()
+    # 1. Trading döngüsünü arka planda başlat
+    t = Thread(target=trading_loop)
+    t.daemon = True
+    t.start()
     
-    # Web sunucusunu ana kolda başlat (Render bunu bekler)
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
-
+    # 2. Flask sunucusunu ana kolda başlat (Render'ın kapanmaması için)
+    run_flask()
