@@ -372,9 +372,6 @@ def trading_loop():
 # ============================================================
 # BAŞLATMA — Thread __main__ dışında başlatılıyor (Render fix)
 # ============================================================
-t = Thread(target=trading_loop, daemon=True)
-t.start()
-
 if __name__ == "__main__":
     if not API_KEY or not API_SECRET:
         print("❌ HATA: BINANCE_API_KEY veya BINANCE_API_SECRET eksik!")
@@ -382,6 +379,10 @@ if __name__ == "__main__":
         print("✅ API anahtarları yüklendi.")
 
     if not TG_TOKEN:
-        print("⚠️  Telegram token bulunamadı. Mesajlar yalnızca konsola yazılacak.")
+        print("⚠️  Telegram token bulunamadı.")
+
+    t = Thread(target=trading_loop, daemon=True)
+    t.start()
+    print("🚀 Trading loop başlatıldı!")
 
     run_flask()
