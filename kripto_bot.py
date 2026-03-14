@@ -19,7 +19,13 @@ app = Flask('')
 @app.route('/')
 def home():
     return "✅ Trading Bot is running!"
-
+@app.route('/ip')
+def get_ip():
+    try:
+        r = requests.get('https://api.ipify.org?format=json', timeout=5)
+        return r.text
+    except Exception as e:
+        return str(e)
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
